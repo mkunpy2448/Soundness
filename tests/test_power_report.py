@@ -256,6 +256,17 @@ class DeckTests(unittest.TestCase):
 
         self.assertEqual(axis_height(presentation(1).slides[1]), axis_height(presentation(6).slides[1]))
 
+    def test_a_short_table_stays_close_to_its_text(self):
+        variables = [
+            SlideVariable(f"V{index}", 5.25, 4.75, "4.6", "-1.4", "0.03", "0.07", [4.98, 5.0])
+            for index in range(4)
+        ]
+        content = ContentSlide("1", "Static Load Test", "90VAC", "3 A", variables)
+        deck = Deck("sample.xlsx", [], 1, ["SN"], [SummaryRow("1", "Static Load Test", "90VAC")], [content])
+        slide = build_presentation(deck).slides[1]
+        table = next(shape for shape in slide.shapes if shape.has_table)
+        self.assertLess(table.height, 1_300_000)
+
 
 class SelectionTests(unittest.TestCase):
     def test_saved_choice_wins_and_a_new_variable_uses_the_preset(self):
@@ -433,6 +444,9 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertNotIn("50.400002", text)
         self.assertIn("U: 5.25", text)
         self.assertIn("L: 4.75", text)
+        lower = next(shape for shape in first.shapes if shape.has_text_frame and shape.text_frame.text == "L: 4.75")
+        vnpp = next(shape for shape in first.shapes if shape.has_text_frame and shape.text_frame.text == "Vnpp_1")
+        self.assertLessEqual(lower.top + lower.height, vnpp.top)
         table_shape = next(shape for shape in first.shapes if shape.has_table)
         for shape in first.shapes:
             if shape.has_text_frame and shape.text_frame.text in {"Vout_1", "Vout_2", "Vnpp_1", "Vnpp_2"}:

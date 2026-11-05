@@ -1218,14 +1218,15 @@ def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVar
                     variable.cp,
                 ]
             )
+        table_height, font_pt = _compact_table_size(len(rows), frame["table_h"])
         _add_table(
             slide,
             frame["margin_x"],
             frame["table_top"],
             frame["width"],
-            frame["table_h"],
+            table_height,
             rows,
-            font_pt=_fit_font(len(rows), frame["table_h"], 11, 6),
+            font_pt=font_pt,
             widths=[frame["width"] * part for part in (0.20, 0.14, 0.14, 0.13, 0.13, 0.13, 0.13)],
         )
     _draw_chart_grid(
@@ -1236,6 +1237,16 @@ def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVar
         frame["chart_h"],
         variables,
     )
+
+
+def _compact_table_size(row_count: int, max_height: float, max_pt: float = 11) -> tuple[float, float]:
+    """Row height stays close to the text unless the rows must shrink to fit."""
+    font_pt = float(max_pt)
+    row_in = font_pt / 72 + 0.10
+    if row_count * row_in <= max_height:
+        return row_count * row_in, font_pt
+    font_pt = _fit_font(row_count, max_height, max_pt, 6)
+    return max_height, font_pt
 
 
 def _draw_chart_grid(slide, left, top, width, height, variables: list[SlideVariable]) -> None:
@@ -1274,7 +1285,9 @@ def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) 
     plot_left = left + gutter
     plot_top = top + title_h
     plot_w = max(0.2, width - gutter - pad)
-    plot_h = max(0.2, height - title_h - pad)
+    # Room under the plot so a lower-limit label is not covered by the next chart.
+    footer = 0.24
+    plot_h = max(0.2, height - title_h - pad - footer)
     lo, hi = _axis_limits(values)
     q1, median, q3 = quartiles(values)
 
@@ -1326,27 +1339,45 @@ def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) 
         dot.line.fill.background()
         dot.shadow.inherit = False
     _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, upper, "U", above=True)
-    _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, lower, "L", above=False)
+    _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, lower, "L", above=False, footer=footer)
 
 
-def _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, limit, tag: str, above: bool) -> None:
+def _mark_limit(
+    slide,
+    plot_left,
+    plot_top,
+    plot_w,
+    plot_h,
+    y_of,
+    lo,
+    hi,
+    limit,
+    tag: str,
+    above: bool,
+    footer: float = 0.24,
+) -> None:
     if limit is None:
         return
     label = f"{tag}: {round_half_up(limit)}"
     label_h = 0.16
     label_w = min(1.2, plot_w * 0.46)
+    below_plot = plot_top + plot_h + 0.04
     if lo <= limit <= hi:
         y_pos = y_of(limit)
         _hline(slide, plot_left, y_pos, plot_left + plot_w, SPEC, 1.5)
-        raw_top = y_pos - label_h - 0.01 if above else y_pos + 0.02
+        raw_top = y_pos - label_h - 0.01 if above else y_pos + 0.04
+        if raw_top + label_h > plot_top + plot_h:
+            raw_top = below_plot
     elif limit > hi:
         raw_top = plot_top
         _hline(slide, plot_left, plot_top + 0.02, plot_left + min(0.7, plot_w), SPEC, 1.5)
     else:
-        raw_top = plot_top + plot_h - label_h
-        edge = plot_top + plot_h - 0.02
+        edge = plot_top + plot_h
         _hline(slide, plot_left, edge, plot_left + min(0.7, plot_w), SPEC, 1.5)
-    top = min(max(raw_top, plot_top), plot_top + plot_h - label_h)
+        raw_top = below_plot
+    floor = plot_top if raw_top < plot_top + plot_h else plot_top + plot_h
+    ceiling = plot_top + plot_h + footer - label_h
+    top = min(max(raw_top, floor), ceiling)
     _write_lines(
         slide,
         plot_left + 0.05,
