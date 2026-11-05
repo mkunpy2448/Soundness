@@ -1061,6 +1061,11 @@ POINT = RGBColor(0x1F, 0x4E, 0x79)
 SPEC = RGBColor(0xFF, 0x00, 0x00)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 HEADER_FILL = RGBColor(0xF2, 0xF2, 0xF2)
+COVER_BG = RGBColor(0x0F, 0x17, 0x2A)
+COVER_AMBER = RGBColor(0xF5, 0x9E, 0x0B)
+COVER_INK = RGBColor(0xF8, 0xFA, 0xFC)
+COVER_BAR = RGBColor(0xEF, 0x44, 0x44)
+BODY_FONT = 12.0
 STAT_HEADERS = (
     "VarName",
     "Upper Spec",
@@ -1088,67 +1093,121 @@ def build_presentation(deck: Deck) -> Presentation:
     presentation.slide_width = Emu(12192000)
     presentation.slide_height = Emu(6858000)
     blank = presentation.slide_layouts[6]
-    _render_summary(presentation.slides.add_slide(blank), deck)
+    _render_cover(presentation.slides.add_slide(blank), deck)
+    _render_lists(presentation.slides.add_slide(blank), deck)
     for content in deck.slides:
         _render_content(presentation, blank, content)
     return presentation
 
 
-def _render_summary(slide, deck: Deck) -> None:
+def _render_cover(slide, deck: Deck) -> None:
+    """Navy cover in the same positions and colors as the FA report title slide."""
+    _solid_background(slide, COVER_BG)
+    left = 0.75
+    _write_lines(
+        slide,
+        left,
+        2547044 / 914400,
+        9901237 / 914400,
+        1205458 / 914400,
+        [(Path(deck.source_name).stem, 40.5, True)],
+        color=COVER_INK,
+        line_spacing=Pt(46.57),
+    )
+    detail_top = 3958530 / 914400
+    detail_height = 1.72
+    _write_cover_fields(
+        slide,
+        left,
+        detail_top,
+        11.5,
+        detail_height,
+        [
+            ("Input voltage range", deck.voltage_range),
+            ("Full load current", deck.full_load_current),
+            ("Date", ", ".join(deck.dates) if deck.dates else NOT_PROVIDED),
+            ("DUT Q'ty", str(deck.unit_count)),
+        ],
+    )
+    bar = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(left),
+        Inches(detail_top + detail_height + 0.20),
+        Emu(685800),
+        Emu(47625),
+    )
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = COVER_BAR
+    bar.line.fill.background()
+    bar.shadow.inherit = False
+
+
+def _write_cover_fields(slide, left, top, width, height, fields: list[tuple[str, str]]):
+    shape = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+    frame = shape.text_frame
+    frame.word_wrap = True
+    frame.auto_size = None
+    _zero_margins(frame)
+    for index, (label, value) in enumerate(fields):
+        paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+        paragraph.alignment = PP_ALIGN.LEFT
+        paragraph.space_before = Pt(0)
+        paragraph.space_after = Pt(0)
+        paragraph.line_spacing = Pt(28)
+        label_run = paragraph.add_run()
+        label_run.text = label
+        _style_run(label_run, BODY_FONT, True, COVER_AMBER)
+        spacer = paragraph.add_run()
+        spacer.text = "    "
+        _style_run(spacer, BODY_FONT, False, COVER_AMBER)
+        value_run = paragraph.add_run()
+        value_run.text = value
+        _style_run(value_run, 16.5, False, COVER_INK)
+    return shape
+
+
+def _render_lists(slide, deck: Deck) -> None:
+    """S/N and selected tests, sized to the text instead of the slide."""
     _white_background(slide)
-    margin = 0.4
-    top = 0.3
-    width = SLIDE_W - 2 * margin
-    date_text = ", ".join(deck.dates)
-    meta_height = 1.72
-    label_width = 2.45
+    margin = 0.42
+    top = 0.32
+    bottom = 0.28
+    gutter = 0.28
+    serial_rows = [["S/N"], *([serial] for serial in deck.serials)]
+    test_rows = [["SEQ", "TIName", "Input voltage"]]
+    test_rows.extend([row.seq, row.ti_name, row.input_voltage] for row in deck.rows)
+    serial_widths = _column_widths(serial_rows, BODY_FONT)
+    test_widths = _column_widths(test_rows, BODY_FONT)
+    available = SLIDE_W - 2 * margin - gutter
+    used = sum(serial_widths) + sum(test_widths)
+    if used > available:
+        scale = available / used
+        serial_widths = [width * scale for width in serial_widths]
+        test_widths = [width * scale for width in test_widths]
+    row_in = BODY_FONT / 72 + 0.10
+    room = SLIDE_H - top - bottom
+    tallest = max(len(serial_rows), len(test_rows), 1)
+    if tallest * row_in > room:
+        row_in = room / tallest
     _add_table(
         slide,
         margin,
         top,
-        width,
-        meta_height,
-        [
-            [Path(deck.source_name).stem, ""],
-            ["Input voltage range", deck.voltage_range],
-            ["Full load current", deck.full_load_current],
-            ["Date", date_text],
-            ["N", str(deck.unit_count)],
-        ],
-        font_pt=13,
-        widths=[label_width, width - label_width],
-        header=False,
-        span_top=True,
-    )
-    lists_top = top + meta_height + 0.16
-    lists_height = SLIDE_H - 0.3 - lists_top
-    gutter = 0.22
-    left_width = 4.2
-    right_width = width - left_width - gutter
-    serial_rows = [["S/N"], *([serial] for serial in deck.serials)]
-    test_rows = [["SEQ", "TIName", "Input voltage"]]
-    test_rows.extend([row.seq, row.ti_name, row.input_voltage] for row in deck.rows)
-    row_height = lists_height / max(len(serial_rows), len(test_rows), 1)
-    font_pt = max(6, min(14, row_height * 72 * 0.62))
-    _add_table(
-        slide,
-        margin,
-        lists_top,
-        left_width,
-        row_height * len(serial_rows),
+        sum(serial_widths),
+        row_in * len(serial_rows),
         serial_rows,
-        font_pt=font_pt,
-        widths=[left_width],
+        font_pt=BODY_FONT,
+        widths=serial_widths,
     )
     _add_table(
         slide,
-        margin + left_width + gutter,
-        lists_top,
-        right_width,
-        row_height * len(test_rows),
+        margin + sum(serial_widths) + gutter,
+        top,
+        sum(test_widths),
+        row_in * len(test_rows),
         test_rows,
-        font_pt=min(font_pt, 12),
-        widths=[right_width * 0.14, right_width * 0.46, right_width * 0.40],
+        font_pt=BODY_FONT,
+        widths=test_widths,
     )
 
 
@@ -1184,12 +1243,12 @@ def _render_content(presentation: Presentation, blank, content: ContentSlide) ->
     pages = [variables[start : start + CHARTS_PER_SLIDE] for start in range(0, len(variables), CHARTS_PER_SLIDE)]
     if not pages:
         pages = [[]]
-    for page, chunk in enumerate(pages):
+    for chunk in pages:
         slide = presentation.slides.add_slide(blank)
-        _render_content_slide(slide, content, chunk, include_table=(page == 0))
+        _render_content_slide(slide, content, chunk)
 
 
-def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVariable], include_table: bool) -> None:
+def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVariable]) -> None:
     _white_background(slide)
     frame = _content_frame()
     _write_lines(
@@ -1200,13 +1259,13 @@ def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVar
         frame["header_h"],
         [
             (content.title, 16, True),
-            (f"Input voltage: {content.input_voltage}", 12, False),
-            (f"Load current: {content.load_current}", 12, False),
+            (f"Input voltage: {content.input_voltage}", BODY_FONT, False),
+            (f"Load current: {content.load_current}", BODY_FONT, False),
         ],
     )
-    if include_table:
+    if variables:
         rows = [list(STAT_HEADERS)]
-        for variable in content.variables:
+        for variable in variables:
             rows.append(
                 [
                     variable.name,
@@ -1218,7 +1277,7 @@ def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVar
                     variable.cp,
                 ]
             )
-        table_height, font_pt = _compact_table_size(len(rows), frame["table_h"])
+        table_height, font_pt = _compact_table_size(len(rows), frame["table_h"], BODY_FONT)
         _add_table(
             slide,
             frame["margin_x"],
@@ -1239,13 +1298,11 @@ def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVar
     )
 
 
-def _compact_table_size(row_count: int, max_height: float, max_pt: float = 11) -> tuple[float, float]:
-    """Row height stays close to the text unless the rows must shrink to fit."""
-    font_pt = float(max_pt)
-    row_in = font_pt / 72 + 0.10
-    if row_count * row_in <= max_height:
-        return row_count * row_in, font_pt
-    font_pt = _fit_font(row_count, max_height, max_pt, 6)
+def _compact_table_size(row_count: int, max_height: float, font_pt: float = BODY_FONT) -> tuple[float, float]:
+    """Row height stays close to the 12pt text unless the rows must share a shorter band."""
+    natural = row_count * (font_pt / 72 + 0.10)
+    if natural <= max_height:
+        return natural, font_pt
     return max_height, font_pt
 
 
@@ -1272,21 +1329,21 @@ def _draw_chart_grid(slide, left, top, width, height, variables: list[SlideVaria
 
 def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) -> None:
     pad = 0.03
-    gutter = min(0.52, max(0.34, width * 0.24))
-    title_h = min(0.22, height * 0.18)
+    gutter = 0.86
+    title_h = 0.30
     _write_lines(
         slide,
         left + gutter,
         top,
         max(0.2, width - gutter - pad),
         title_h,
-        [(title, 8 if height >= 0.9 else 7, True)],
+        [(title, BODY_FONT, True)],
     )
     plot_left = left + gutter
     plot_top = top + title_h
     plot_w = max(0.2, width - gutter - pad)
-    # Room under the plot so a lower-limit label is not covered by the next chart.
-    footer = 0.24
+    # Room under the plot so a 12pt lower-limit label is not covered by the next chart.
+    footer = 0.36
     plot_h = max(0.2, height - title_h - pad - footer)
     lo, hi = _axis_limits(values)
     q1, median, q3 = quartiles(values)
@@ -1338,7 +1395,7 @@ def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) 
         dot.fill.fore_color.rgb = POINT
         dot.line.fill.background()
         dot.shadow.inherit = False
-    _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, upper, "U", above=True)
+    _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, upper, "U", above=True, footer=footer)
     _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, lower, "L", above=False, footer=footer)
 
 
@@ -1354,13 +1411,13 @@ def _mark_limit(
     limit,
     tag: str,
     above: bool,
-    footer: float = 0.24,
+    footer: float = 0.36,
 ) -> None:
     if limit is None:
         return
     label = f"{tag}: {round_half_up(limit)}"
-    label_h = 0.16
-    label_w = min(1.2, plot_w * 0.46)
+    label_h = 0.24
+    label_w = min(1.45, plot_w * 0.55)
     below_plot = plot_top + plot_h + 0.04
     if lo <= limit <= hi:
         y_pos = y_of(limit)
@@ -1384,7 +1441,7 @@ def _mark_limit(
         top,
         label_w,
         label_h,
-        [(label, 8, True)],
+        [(label, BODY_FONT, True)],
         color=SPEC,
         wrap=False,
     )
@@ -1433,12 +1490,12 @@ def _draw_axis_labels(slide, left, plot_left, plot_top, plot_h, lo, hi, y_of) ->
     last_y: float | None = None
     for value in _nice_ticks(lo, hi):
         y_pos = y_of(value)
-        if last_y is not None and abs(y_pos - last_y) < 0.16:
+        if last_y is not None and abs(y_pos - last_y) < 0.26:
             continue
         kept.append(value)
         last_y = y_pos
-    label_w = max(0.2, plot_left - left - 0.03)
-    label_h = 0.16
+    label_w = max(0.2, plot_left - left - 0.04)
+    label_h = 0.24
     seen: set[str] = set()
     for value in kept:
         text = round_half_up(value)
@@ -1453,7 +1510,7 @@ def _draw_axis_labels(slide, left, plot_left, plot_top, plot_h, lo, hi, y_of) ->
             top,
             label_w,
             label_h,
-            [(text, 7, False)],
+            [(text, BODY_FONT, False)],
             alignment=PP_ALIGN.RIGHT,
             wrap=False,
         )
@@ -1484,11 +1541,34 @@ def _spec_text(value: float | None) -> str:
     return round_half_up(value)
 
 
-def _fit_font(row_count: int, height_in: float, max_pt: float, min_pt: float = 6) -> float:
-    if row_count <= 0:
-        return max_pt
-    raw = (height_in / row_count) * 72 * 0.62
-    return max(min_pt, min(max_pt, raw))
+def _text_width(text: str, font_pt: float) -> float:
+    em = font_pt / 72.0
+    width = 0.0
+    for char in text:
+        if char == " ":
+            width += em * 0.36
+        elif ord(char) > 0x2E80:
+            width += em
+        elif char in "MW@#%&":
+            width += em * 0.95
+        elif char in "ilj.,:;!'|`":
+            width += em * 0.30
+        elif char.isupper():
+            width += em * 0.72
+        elif char.isdigit():
+            width += em * 0.58
+        else:
+            width += em * 0.56
+    return width
+
+
+def _column_widths(rows: list[list[str]], font_pt: float) -> list[float]:
+    """Column widths follow the text, plus the cell padding."""
+    widths: list[float] = []
+    for column in range(len(rows[0])):
+        widest = max(_text_width(str(row[column]), font_pt) for row in rows)
+        widths.append(max(0.55, widest + 0.22))
+    return widths
 
 
 def _write_lines(
@@ -1501,20 +1581,31 @@ def _write_lines(
     alignment=PP_ALIGN.LEFT,
     wrap: bool = True,
     color: RGBColor = INK,
+    line_spacing=None,
 ):
     shape = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     frame = shape.text_frame
     frame.word_wrap = wrap
     frame.auto_size = None
+    _zero_margins(frame)
     for index, (text, size, bold) in enumerate(lines):
         paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
         paragraph.alignment = alignment
         paragraph.space_before = Pt(0)
         paragraph.space_after = Pt(0)
+        if line_spacing is not None:
+            paragraph.line_spacing = line_spacing
         run = paragraph.add_run()
         run.text = text
         _style_run(run, size, bold, color)
     return shape
+
+
+def _zero_margins(frame) -> None:
+    frame.margin_left = Emu(0)
+    frame.margin_right = Emu(0)
+    frame.margin_top = Emu(0)
+    frame.margin_bottom = Emu(0)
 
 
 def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=True, span_top=False):
@@ -1540,6 +1631,10 @@ def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=Tr
             )
     if span_top and len(rows[0]) > 1:
         table.cell(0, 0).merge(table.cell(0, len(rows[0]) - 1))
+    last = len(table.rows) - 1
+    for row_index, row in enumerate(table.rows):
+        for cell in row.cells:
+            _set_horizontal_border(cell, draw_bottom=row_index < last)
     return shape
 
 
@@ -1560,7 +1655,6 @@ def _fill_cell(cell, text: str, font_pt: float, bold: bool, fill: RGBColor) -> N
     cell.margin_bottom = Inches(0.01)
     cell.fill.solid()
     cell.fill.fore_color.rgb = fill
-    _set_cell_border(cell)
 
 
 def _style_run(run, size_pt: float, bold: bool, color: RGBColor = INK) -> None:
@@ -1577,21 +1671,26 @@ def _style_run(run, size_pt: float, bold: bool, color: RGBColor = INK) -> None:
         element.set("typeface", "Calibri")
 
 
-def _set_cell_border(cell, color: str = "A6A6A6") -> None:
+def _set_horizontal_border(cell, draw_bottom: bool, color: str = "A6A6A6") -> None:
+    """Keep only the horizontal line between rows."""
     properties = cell._tc.get_or_add_tcPr()
     for edge in ("lnL", "lnR", "lnT", "lnB"):
         tag = qn(f"a:{edge}")
         for old in properties.findall(tag):
             properties.remove(old)
         line = etree.SubElement(properties, tag)
-        line.set("w", "6350")
+        show = edge == "lnB" and draw_bottom
+        line.set("w", "6350" if show else "0")
         line.set("cap", "flat")
         line.set("cmpd", "sng")
         line.set("algn", "ctr")
-        fill = etree.SubElement(line, qn("a:solidFill"))
-        color_el = etree.SubElement(fill, qn("a:srgbClr"))
-        color_el.set("val", color)
-        etree.SubElement(line, qn("a:prstDash")).set("val", "solid")
+        if show:
+            fill = etree.SubElement(line, qn("a:solidFill"))
+            color_el = etree.SubElement(fill, qn("a:srgbClr"))
+            color_el.set("val", color)
+            etree.SubElement(line, qn("a:prstDash")).set("val", "solid")
+        else:
+            etree.SubElement(line, qn("a:noFill"))
 
 
 def _remove_table_style(shape) -> None:
@@ -1603,10 +1702,14 @@ def _remove_table_style(shape) -> None:
         table_properties.remove(style)
 
 
-def _white_background(slide) -> None:
+def _solid_background(slide, color: RGBColor) -> None:
     fill = slide.background.fill
     fill.solid()
-    fill.fore_color.rgb = WHITE
+    fill.fore_color.rgb = color
+
+
+def _white_background(slide) -> None:
+    _solid_background(slide, WHITE)
 
 
 """Local page that collects choices and writes the PowerPoint file."""

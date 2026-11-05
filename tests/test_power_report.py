@@ -9,6 +9,7 @@ import run_report
 
 from openpyxl import Workbook
 from pptx import Presentation
+from pptx.oxml.ns import qn
 
 from run_report import (
     ContentSlide,
@@ -93,6 +94,22 @@ def _assert_shapes_inside(presentation, slide) -> None:
             raise AssertionError(f"shape starts off the slide: {shape.left}, {shape.top}")
         if right > presentation.slide_width + tolerance or bottom > presentation.slide_height + tolerance:
             raise AssertionError(f"shape ends off the slide: {right}, {bottom}")
+
+
+def _assert_horizontal_inner_borders(table) -> None:
+    rows = list(table.rows)
+    for index, row in enumerate(rows):
+        expect_bottom = index < len(rows) - 1
+        for cell in row.cells:
+            props = cell._tc.find(qn("a:tcPr"))
+            for edge in ("lnL", "lnR", "lnT", "lnB"):
+                node = props.find(qn(f"a:{edge}"))
+                solid = node is not None and node.find(qn("a:solidFill")) is not None
+                if edge == "lnB" and expect_bottom:
+                    if not solid:
+                        raise AssertionError(f"missing inner horizontal border on row {index}")
+                elif solid:
+                    raise AssertionError(f"unexpected {edge} border on row {index}")
 
 
 def slide_text(slide) -> str:
@@ -223,22 +240,42 @@ class DeckTests(unittest.TestCase):
         self.assertEqual(deck.slides[0].input_voltage, "Not provided")
         self.assertEqual(deck.dates, ["2026/1/1~2026/1/2"])
         self.assertEqual(deck.rows[0].input_voltage, "Not provided")
-        text = slide_text(build_presentation(deck).slides[1])
+        presentation = build_presentation(deck)
+        text = slide_text(presentation.slides[2])
         self.assertIn("Vout_1", text)
         self.assertNotIn("Iout_1", text)
         self.assertNotIn("Samples", text)
         self.assertNotIn("2026/1/1~2026/1/2", text)
-        summary_slide = build_presentation(deck).slides[0]
-        summary = slide_text(summary_slide)
-        self.assertIn("Date", summary)
-        self.assertIn("2026/1/1~2026/1/2", summary)
-        meta = next(shape.table for shape in summary_slide.shapes if shape.has_table)
-        self.assertEqual(meta.rows[0].cells[0].text, "deck")
-        self.assertEqual([cell.text for cell in meta.rows[1].cells], ["Input voltage range", "Not provided"])
-        self.assertEqual([cell.text for cell in meta.rows[2].cells], ["Full load current", "Not provided"])
-        self.assertEqual([cell.text for cell in meta.rows[4].cells], ["N", "2"])
-        self.assertIn("SN-A", summary)
-        self.assertNotIn("Samples", summary)
+        cover = presentation.slides[0]
+        cover_text = slide_text(cover)
+        self.assertIn("deck", cover_text)
+        self.assertIn("Date", cover_text)
+        self.assertIn("2026/1/1~2026/1/2", cover_text)
+        self.assertIn("Input voltage range", cover_text)
+        self.assertIn("Full load current", cover_text)
+        self.assertIn("Not provided", cover_text)
+        self.assertIn("DUT Q'ty", cover_text)
+        self.assertIn("2", cover_text)
+        self.assertNotIn("HARDWARE FAILURE", cover_text)
+        self.assertFalse(any(shape.has_table for shape in cover.shapes))
+        self.assertIn("0F172A", cover._element.xml)
+        self.assertIn("EF4444", cover._element.xml)
+        self.assertIn("F8FAFC", cover._element.xml)
+        self.assertIn("F59E0B", cover._element.xml)
+        lists = presentation.slides[1]
+        list_tables = [shape for shape in lists.shapes if shape.has_table]
+        self.assertEqual(len(list_tables), 2)
+        self.assertLess(list_tables[1].left + list_tables[1].width, presentation.slide_width - 400000)
+        for shape in list_tables:
+            _assert_horizontal_inner_borders(shape.table)
+        self.assertIn("SN-A", slide_text(lists))
+        self.assertNotIn("Samples", slide_text(lists))
+        content_table = next(shape.table for shape in presentation.slides[2].shapes if shape.has_table)
+        _assert_horizontal_inner_borders(content_table)
+        self.assertNotIn('sz="800"', presentation.slides[2]._element.xml)
+        self.assertNotIn('sz="700"', presentation.slides[2]._element.xml)
+        self.assertIn('sz="1200"', presentation.slides[2]._element.xml)
+        self.assertIn('sz="1600"', presentation.slides[2]._element.xml)
 
     def test_one_chart_uses_the_same_cell_as_six(self):
         def presentation(count: int):
@@ -254,7 +291,7 @@ class DeckTests(unittest.TestCase):
             heights = [shape.height for shape in slide.shapes if shape.width < 30000 and shape.height > 200000]
             return max(heights)
 
-        self.assertEqual(axis_height(presentation(1).slides[1]), axis_height(presentation(6).slides[1]))
+        self.assertEqual(axis_height(presentation(1).slides[2]), axis_height(presentation(6).slides[2]))
 
     def test_a_short_table_stays_close_to_its_text(self):
         variables = [
@@ -263,7 +300,7 @@ class DeckTests(unittest.TestCase):
         ]
         content = ContentSlide("1", "Static Load Test", "90VAC", "3 A", variables)
         deck = Deck("sample.xlsx", [], 1, ["SN"], [SummaryRow("1", "Static Load Test", "90VAC")], [content])
-        slide = build_presentation(deck).slides[1]
+        slide = build_presentation(deck).slides[2]
         table = next(shape for shape in slide.shapes if shape.has_table)
         self.assertLess(table.height, 1_300_000)
 
@@ -346,8 +383,8 @@ class ServerTests(unittest.TestCase):
         body = json.loads(urllib.request.urlopen(request).read().decode("utf-8"))
         self.assertTrue(body["ok"])
         presentation = Presentation(body["path"])
-        self.assertEqual(len(presentation.slides), 2)
-        content = slide_text(presentation.slides[1])
+        self.assertEqual(len(presentation.slides), 3)
+        content = slide_text(presentation.slides[2])
         self.assertIn("100VAC", content)
         self.assertIn("1.50", content)
         self.assertIn("U: 5.08", content)
@@ -357,8 +394,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("90-264VAC", summary)
         self.assertIn("Full load current", summary)
         self.assertIn("8.5A", summary)
-        self.assertIn("Calibri", presentation.slides[1]._element.xml)
-        self.assertIn("FF0000", presentation.slides[1]._element.xml)
+        self.assertIn("Calibri", presentation.slides[2]._element.xml)
+        self.assertIn("FF0000", presentation.slides[2]._element.xml)
         saved = json.loads(Path(body["selectionPath"]).read_text(encoding="utf-8"))
         self.assertEqual(saved["groups"][report.groups[0].key]["input_voltage"], "100VAC")
         server.server_close()
@@ -413,21 +450,28 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertEqual(deck.unit_count, 10)
         self.assertEqual(deck.dates, ["2026/7/27~2026/9/30"])
         presentation = build_presentation(deck)
-        expected_slides = 1 + sum((len(slide.variables) + 5) // 6 for slide in deck.slides)
+        expected_slides = 2 + sum((len(slide.variables) + 5) // 6 for slide in deck.slides)
         self.assertEqual(len(presentation.slides), expected_slides)
         self.assertGreater(expected_slides, 26)
         _assert_shapes_inside(presentation, presentation.slides[0])
-        summary_tables = [shape for shape in presentation.slides[0].shapes if shape.has_table]
-        self.assertLess(summary_tables[1].height, summary_tables[2].height)
-        summary = slide_text(presentation.slides[0])
-        self.assertIn("Date", summary)
-        self.assertIn("2026/7/27~2026/9/30", summary)
-        self.assertIn("TBFHD1048401", summary)
-        self.assertIn("Static Load Test", summary)
-        self.assertIn(SAMPLE.stem, summary)
-        self.assertNotIn(".xlsx", summary)
-        self.assertNotIn("Samples", summary)
-        first = presentation.slides[1]
+        cover = slide_text(presentation.slides[0])
+        self.assertIn("Date", cover)
+        self.assertIn("2026/7/27~2026/9/30", cover)
+        self.assertIn("DUT Q'ty", cover)
+        self.assertIn("10", cover)
+        self.assertIn(SAMPLE.stem, cover)
+        self.assertNotIn(".xlsx", cover)
+        self.assertNotIn("Samples", cover)
+        self.assertIn("0F172A", presentation.slides[0]._element.xml)
+        list_tables = [shape for shape in presentation.slides[1].shapes if shape.has_table]
+        self.assertEqual(len(list_tables), 2)
+        self.assertLess(list_tables[0].height, list_tables[1].height)
+        self.assertLess(list_tables[1].left + list_tables[1].width, presentation.slide_width - 400000)
+        lists = slide_text(presentation.slides[1])
+        self.assertIn("TBFHD1048401", lists)
+        self.assertIn("Static Load Test", lists)
+        self.assertNotIn("Samples", lists)
+        first = presentation.slides[2]
         tables = [shape.table for shape in first.shapes if shape.has_table]
         self.assertEqual(
             [cell.text for cell in tables[0].rows[0].cells],
