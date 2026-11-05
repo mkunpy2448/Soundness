@@ -15,6 +15,8 @@ from run_report import (
     assemble,
     build_presentation,
     choices_from_payload,
+    _axis_limits,
+    default_checked,
     default_load,
     default_voltage,
     load_report,
@@ -109,6 +111,12 @@ class NumberTests(unittest.TestCase):
         self.assertEqual(round_half_up_2(3.0029), "3.00")
         self.assertEqual(round_half_up_2(2.5), "2.50")
 
+    def test_axis_follows_the_readings_rather_than_a_distant_spec(self):
+        lo, hi = _axis_limits([4.9753, 5.0058])
+        self.assertLess(hi - lo, 0.08)
+        self.assertGreater(lo, 4.9)
+        self.assertLess(hi, 5.1)
+
     def test_inclusive_quartiles(self):
         self.assertEqual(quartiles([1, 2, 3, 4]), (1.75, 2.5, 3.25))
         self.assertEqual(quartiles([4]), (4, 4, 4))
@@ -138,9 +146,9 @@ class ParseTests(unittest.TestCase):
         report = load_report(self.path)
         self.assertEqual(report.serials, ["SN-A", "SN-B"])
         self.assertEqual([group.seq for group in report.groups], ["1", "1", "2"])
-        self.assertEqual(default_load(report.groups[0]), "3.00")
+        self.assertEqual(default_load(report.groups[0]), "3 A")
         self.assertEqual(default_voltage(report.groups[2]), "Not provided")
-        self.assertEqual(default_load(report.groups[2]), "1.25")
+        self.assertEqual(default_load(report.groups[2]), "1.25 A")
         self.assertEqual([variable.name for variable in report.groups[2].plottable_variables], ["Thd_1"])
         thd = report.groups[2].plottable_variables[0]
         self.assertIsNone(thd.upper)
@@ -221,38 +229,41 @@ class DeckTests(unittest.TestCase):
         self.assertIn("Date", summary)
         self.assertIn("2026/1/1~2026/1/2", summary)
         meta = next(shape.table for shape in summary_slide.shapes if shape.has_table)
-        self.assertEqual([cell.text for cell in meta.rows[1].cells], ["N", "2"])
+        self.assertEqual(meta.rows[0].cells[0].text, "deck")
+        self.assertEqual([cell.text for cell in meta.rows[2].cells], ["N", "2"])
         self.assertIn("SN-A", summary)
         self.assertNotIn("Samples", summary)
 
 
 class SelectionTests(unittest.TestCase):
-    def test_saved_unchecked_stays_off_and_new_variable_defaults_on(self):
+    def test_saved_choice_wins_and_a_new_variable_uses_the_preset(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "choice.xlsx"
         write_fixture(
             path,
             [
-                {"seq": 1, "ti": "Static", "ext": "90VAC", "var": "Vout_1", "values": [1, 2]},
-                {"seq": 1, "ti": "Static", "ext": "90VAC", "var": "Vout_2", "values": [1, 2]},
+                {"seq": 1, "ti": "Static Load Test", "ext": "90VAC", "var": "Vout_1", "values": [1, 2]},
+                {"seq": 1, "ti": "Static Load Test", "ext": "90VAC", "var": "Vout_2", "values": [1, 2]},
+                {"seq": 1, "ti": "Static Load Test", "ext": "90VAC", "var": "Iout_1", "upper": 3, "values": [1, 2]},
             ],
             ["SN-A", "SN-B"],
         )
         report = load_report(path)
         choices = choices_from_payload(
             report,
-            {"groups": [{"key": report.groups[0].key, "input_voltage": "100VAC", "load_current": "3.00", "checked": ["Vout_1"]}]},
+            {"groups": [{"key": report.groups[0].key, "input_voltage": "100VAC", "load_current": "3 A", "checked": ["Vout_1"]}]},
         )
         save_choices(selection_path(path), report, choices)
         saved = json.loads(selection_path(path).read_text(encoding="utf-8"))
-        saved["groups"][report.groups[0].key]["variables"]["Vout_3"] = False
-        # A variable absent from the saved map is new.
+        self.assertEqual(saved["version"], 2)
         del saved["groups"][report.groups[0].key]["variables"]["Vout_2"]
+        del saved["groups"][report.groups[0].key]["variables"]["Iout_1"]
         model = page_model(report, saved["groups"])
         flags = {item["name"]: item["checked"] for item in model["groups"][0]["variables"]}
         self.assertEqual(flags["Vout_1"], True)
         self.assertEqual(flags["Vout_2"], True)
+        self.assertEqual(flags["Iout_1"], False)
         self.assertEqual(model["groups"][0]["inputVoltage"], "100VAC")
 
 
@@ -263,7 +274,7 @@ class ServerTests(unittest.TestCase):
         path = Path(directory.name) / "web.xlsx"
         write_fixture(
             path,
-            [{"seq": 1, "ti": "Static", "ext": "90VAC", "var": "Vout_1", "upper": 5.25, "lower": 4.75, "values": [5, 5.1]}],
+            [{"seq": 1, "ti": "Static", "ext": "90VAC", "var": "Vout_1", "upper": 5.08, "lower": 5.02, "values": [5, 5.1]}],
             ["SN-A", "SN-B"],
         )
         report = load_report(path)
@@ -318,15 +329,33 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertEqual(len(report.picker_groups()), 25)
         by_seq = {group.seq: group for group in report.groups}
         self.assertEqual(default_voltage(by_seq["1"]), "90VAC")
-        self.assertEqual(default_load(by_seq["1"]), "3.00 / 1.25")
-        self.assertEqual(default_load(by_seq["6"]), "6.00 / 2.50 / 6.00 / 2.50 / 6.00 / 2.50")
-        self.assertEqual(default_load(by_seq["18"]), "0.10 / 0.10")
-        self.assertEqual(default_load(by_seq["25"]), "0.00 / 0.00")
+        self.assertEqual(default_load(by_seq["1"]), "3 / 1.25 A")
+        self.assertEqual(default_load(by_seq["6"]), "6 / 2.50 / 6 / 2.50 / 6 / 2.50 A")
+        self.assertEqual(default_load(by_seq["18"]), "0.10 / 0.10 A")
+        self.assertEqual(default_load(by_seq["25"]), "0 / 0 A")
         self.assertEqual(default_voltage(by_seq["2"]), "Not provided")
         self.assertEqual(default_load(by_seq["2"]), "Not provided")
         vout = next(variable for variable in by_seq["1"].variables if variable.name == "Vout_1")
         self.assertNotEqual(round(sum(vout.values) / len(vout.values), 3), round(float(vout.mean), 3))
         model = page_model(report, {})
+        by_model = {group["seq"]: group for group in model["groups"]}
+        static_flags = {item["name"]: item["checked"] for item in by_model["1"]["variables"]}
+        self.assertEqual(static_flags["Vout_1"], True)
+        self.assertEqual(static_flags["Vout_2"], True)
+        self.assertEqual(static_flags["Vnpp_1"], True)
+        self.assertEqual(static_flags["Vnpp_2"], True)
+        self.assertEqual(static_flags["Iout_1"], False)
+        turn_on = {item["name"]: item["checked"] for item in by_model["2"]["variables"]}
+        self.assertEqual(turn_on["Ton_1"], True)
+        self.assertEqual(turn_on["Ton_2"], True)
+        self.assertEqual(turn_on["Trise_1"], False)
+        self.assertTrue(all(not item["checked"] for item in by_model["21"]["variables"]))
+        efficiency = {item["name"]: item["checked"] for item in by_model["9"]["variables"]}
+        self.assertEqual(efficiency["PF_1"], True)
+        self.assertEqual(efficiency["Eff_1"], True)
+        self.assertEqual(efficiency["Vout_1"], False)
+        self.assertTrue(default_checked("Short Circuit Protection Test_2(M)", "Rec_Vout_1"))
+        self.assertFalse(default_checked("Dynamic Load Setup(M)", "Dynamic_Load_1_1"))
         choices = choices_from_payload(report, {"groups": [
             {
                 "key": group["key"],
@@ -349,6 +378,8 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertIn("2026/7/27~2026/9/30", summary)
         self.assertIn("TBFHD1048401", summary)
         self.assertIn("Static Load Test", summary)
+        self.assertIn(SAMPLE.stem, summary)
+        self.assertNotIn(".xlsx", summary)
         self.assertNotIn("Samples", summary)
         first = presentation.slides[1]
         tables = [shape.table for shape in first.shapes if shape.has_table]
@@ -357,10 +388,14 @@ class SampleWorkbookTests(unittest.TestCase):
             ["VarName", "Upper Spec", "Lower Spec", "Mean", "Ca", "Cpk", "Cp"],
         )
         text = slide_text(first)
-        self.assertIn(SAMPLE.name, text)
+        self.assertNotIn(SAMPLE.name, text)
+        self.assertNotIn(SAMPLE.stem, text)
         self.assertIn("SEQ 1 Static Load Test 90VAC", text)
-        self.assertIn("3.00 / 1.25", text)
-        self.assertIn("4.637153", text)
+        self.assertIn("3 / 1.25 A", text)
+        self.assertIn("4.637", text)
+        self.assertNotIn("4.637153", text)
+        self.assertIn("50.4", text)
+        self.assertNotIn("50.400002", text)
         self.assertNotIn("2026/7/27~2026/9/30", text)
         self.assertNotIn("TBFED1022848", text)
         self.assertIn("1F4E79", first._element.xml)

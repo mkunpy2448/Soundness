@@ -300,6 +300,26 @@ def round_half_up_2(value: float) -> str:
     return f"{quantized:.2f}"
 
 
+def round_half_up(value: float, places: int = 3) -> str:
+    """Round half away from zero and drop trailing zeros."""
+    quant = Decimal("1").scaleb(-places)
+    quantized = Decimal(str(value)).quantize(quant, rounding=ROUND_HALF_UP)
+    text = format(quantized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text in {"", "-0"}:
+        return "0"
+    return text
+
+
+def format_load_number(value: float) -> str:
+    """Two decimals, with .00 removed when the rounded value is an integer."""
+    text = round_half_up_2(value)
+    if text.endswith(".00"):
+        return text[:-3]
+    return text
+
+
 def quartiles(values: list[float]) -> tuple[float, float, float]:
     """Return Q1, median, Q3 using the inclusive quartile definition."""
     ordered = sorted(values)
@@ -626,18 +646,53 @@ def default_voltage(group: SeqGroup) -> str:
     return group.ext_name if group.ext_name else NOT_PROVIDED
 
 
+# TIName prefix, then the VarNames that start checked. Anything else starts off.
+# A trailing marker such as "(M)" or "_2" still matches the prefix.
+_PRESET_CHECKS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("static load test", frozenset({"Vout_1", "Vout_2", "Vnpp_1", "Vnpp_2"})),
+    ("turn on & sequence test", frozenset({"Ton_1", "Ton_2"})),
+    ("hold up & sequence test", frozenset({"Thd_1", "Thd_2"})),
+    (
+        "line regulation test",
+        frozenset({"Vout_1_1", "Vout_1_2", "Vout_2_1", "Vout_2_2", "Vout_3_1", "Vout_3_2"}),
+    ),
+    (
+        "load regulation test",
+        frozenset({"Vout_1_1", "Vout_1_2", "Vout_2_1", "Vout_2_2", "Vout_3_1", "Vout_3_2"}),
+    ),
+    (
+        "short circuit protection test",
+        frozenset({"Vdisable_1", "Vdisable_2", "Rec_Vout_1", "Rec_Vout_2"}),
+    ),
+    ("efficiency & power factor test", frozenset({"PF_1", "Eff_1"})),
+    ("over load protection test", frozenset({"OLP_Trip_1"})),
+    (
+        "dynamic load regulation test",
+        frozenset({"Vpk+_1", "Vpk+_2", "Vpk-_1", "Vpk-_2"}),
+    ),
+)
+
+
+def default_checked(ti_name: str, variable_name: str) -> bool:
+    folded = " ".join(ti_name.casefold().split())
+    for prefix, names in _PRESET_CHECKS:
+        if folded.startswith(prefix):
+            return variable_name in names
+    return False
+
+
 def default_load(group: SeqGroup) -> str:
-    """Upper Spec of every VarName containing Iout, left to right, two decimals."""
+    """Upper Spec of every VarName containing Iout, then a trailing A."""
     parts: list[str] = []
     for variable in group.variables:
         if "iout" not in variable.name.casefold():
             continue
         if variable.upper is None:
             continue
-        parts.append(round_half_up_2(variable.upper))
+        parts.append(format_load_number(variable.upper))
     if not parts:
         return NOT_PROVIDED
-    return " / ".join(parts)
+    return " / ".join(parts) + " A"
 
 
 """Turn a workbook and the picker's choices into the slide contents."""
@@ -760,7 +815,7 @@ def _display_stat(value: object) -> str:
     if value is None:
         return ""
     if is_number(value):
-        return format_number(float(value))
+        return round_half_up(float(value))
     if isinstance(value, str):
         return value.strip()
     return str(value).strip()
@@ -783,7 +838,9 @@ def load_saved_groups(path: Path) -> dict:
     except (OSError, json.JSONDecodeError):
         print(f"無法讀取勾選檔，改用預設值：{path}", file=sys.stderr)
         return {}
-    groups = payload.get("groups") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        return {}
+    groups = payload.get("groups")
     if not isinstance(groups, dict):
         return {}
     return groups
@@ -806,10 +863,10 @@ def page_model(report: Report, saved_groups: dict) -> dict:
             load = load_default
         variables = []
         for variable in group.plottable_variables:
-            if previous is None or variable.uid not in previous:
-                checked = True
-            else:
+            if previous is not None and variable.uid in previous:
                 checked = bool(previous[variable.uid])
+            else:
+                checked = default_checked(group.ti_name, variable.name)
             variables.append(
                 {"uid": variable.uid, "name": variable.name, "checked": checked}
             )
@@ -875,7 +932,7 @@ def save_choices(path: Path, report: Report, choices: list[GroupChoice]) -> None
                 for variable in group.plottable_variables
             },
         }
-    _write_json(path, {"version": 1, "groups": groups})
+    _write_json(path, {"version": 2, "groups": groups})
 
 
 def _stored_text(value: object, default: str) -> str:
@@ -972,17 +1029,22 @@ def _render_summary(slide, deck: Deck) -> None:
     top = 0.3
     width = SLIDE_W - 2 * margin
     date_text = ", ".join(deck.dates)
-    meta_height = 0.78
+    meta_height = 1.14
     _add_table(
         slide,
         margin,
         top,
         width,
         meta_height,
-        [["Date", date_text], ["N", str(deck.unit_count)]],
+        [
+            [Path(deck.source_name).stem, ""],
+            ["Date", date_text],
+            ["N", str(deck.unit_count)],
+        ],
         font_pt=14,
         widths=[1.5, width - 1.5],
         header=False,
+        span_top=True,
     )
     lists_top = top + meta_height + 0.16
     lists_height = SLIDE_H - 0.3 - lists_top
@@ -1021,7 +1083,7 @@ def _render_content(slide, deck: Deck, content: ContentSlide) -> None:
     margin_x = 0.4
     margin_y = 0.26
     width = SLIDE_W - 2 * margin_x
-    header_h = 1.25
+    header_h = 0.92
     _write_lines(
         slide,
         margin_x,
@@ -1029,7 +1091,6 @@ def _render_content(slide, deck: Deck, content: ContentSlide) -> None:
         width,
         header_h,
         [
-            (deck.source_name, 12, True),
             (content.title, 16, True),
             (f"Input voltage: {content.input_voltage}", 12, False),
             (f"Load current: {content.load_current}", 12, False),
@@ -1113,27 +1174,30 @@ def _grid_shape(count: int) -> tuple[int, int]:
 
 
 def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) -> None:
-    pad = 0.04
-    title_h = min(0.24, height * 0.22)
+    pad = 0.03
+    gutter = min(0.52, max(0.34, width * 0.24))
+    title_h = min(0.22, height * 0.18)
     _write_lines(
         slide,
-        left + pad,
+        left + gutter,
         top,
-        max(0.2, width - 2 * pad),
+        max(0.2, width - gutter - pad),
         title_h,
         [(title, 8 if height >= 0.9 else 7, True)],
     )
-    plot_left = left + pad
+    plot_left = left + gutter
     plot_top = top + title_h
-    plot_w = max(0.2, width - 2 * pad)
+    plot_w = max(0.2, width - gutter - pad)
     plot_h = max(0.2, height - title_h - pad)
-    lo, hi = _axis_limits(values, lower, upper)
+    lo, hi = _axis_limits(values)
     q1, median, q3 = quartiles(values)
 
     def y_of(value: float) -> float:
         fraction = (value - lo) / (hi - lo)
         return plot_top + (1 - fraction) * plot_h
 
+    _vline(slide, plot_left, plot_top, plot_top + plot_h, GRAY_LINE, 0.75)
+    _draw_axis_labels(slide, left, plot_left, plot_top, plot_h, lo, hi, y_of)
     center = plot_left + plot_w * 0.5
     box_w = max(0.08, plot_w * 0.28)
     y_min = y_of(min(values))
@@ -1176,24 +1240,79 @@ def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) 
         dot.line.fill.background()
         dot.shadow.inherit = False
     for limit in (lower, upper):
-        if limit is None:
+        if limit is None or limit < lo or limit > hi:
             continue
         _hline(slide, plot_left, y_of(limit), plot_left + plot_w, SPEC, 1.25)
 
 
-def _axis_limits(values: list[float], lower: float | None, upper: float | None) -> tuple[float, float]:
+def _axis_limits(values: list[float]) -> tuple[float, float]:
+    """Fit the axis to the readings so the box and points use the plot height."""
     lo = min(values)
     hi = max(values)
-    for limit in (lower, upper):
-        if limit is None:
-            continue
-        lo = min(lo, limit)
-        hi = max(hi, limit)
-    if hi == lo:
-        pad = abs(lo) * 0.05 if lo else 1.0
+    span = hi - lo
+    if span == 0:
+        pad = max(abs(lo) * 0.05, 0.05)
         return lo - pad, hi + pad
-    pad = (hi - lo) * 0.08
+    pad = span * 0.12
     return lo - pad, hi + pad
+
+
+def _nice_ticks(lo: float, hi: float, maximum: int = 4) -> list[float]:
+    span = hi - lo
+    if span <= 0:
+        return [lo]
+    raw = span / max(maximum, 1)
+    exponent = math.floor(math.log10(raw))
+    magnitude = 10.0 ** exponent
+    step = 10 * magnitude
+    for factor in (1, 2, 2.5, 5, 10):
+        candidate = factor * magnitude
+        if raw <= candidate * 1.001:
+            step = candidate
+            break
+    start = math.ceil((lo - step * 1e-9) / step) * step
+    ticks: list[float] = []
+    value = start
+    for _ in range(12):
+        if value > hi + step * 1e-9:
+            break
+        if value >= lo - step * 1e-9:
+            ticks.append(value)
+        value += step
+    return ticks or [lo, hi]
+
+
+def _draw_axis_labels(slide, left, plot_left, plot_top, plot_h, lo, hi, y_of) -> None:
+    span = hi - lo
+    kept: list[float] = []
+    last_y: float | None = None
+    for value in _nice_ticks(lo, hi):
+        y_pos = y_of(value)
+        if last_y is not None and abs(y_pos - last_y) < 0.16:
+            continue
+        kept.append(value)
+        last_y = y_pos
+    label_w = max(0.2, plot_left - left - 0.03)
+    label_h = 0.16
+    seen: set[str] = set()
+    for value in kept:
+        text = round_half_up(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        y_pos = y_of(value)
+        top = min(max(y_pos - label_h / 2, plot_top), plot_top + plot_h - label_h)
+        _write_lines(
+            slide,
+            left,
+            top,
+            label_w,
+            label_h,
+            [(text, 7, False)],
+            alignment=PP_ALIGN.RIGHT,
+            wrap=False,
+        )
+        _hline(slide, plot_left, y_pos, plot_left + 0.045, GRAY_LINE, 0.75)
 
 
 def _hline(slide, x1, y1, x2, color, width_pt) -> None:
@@ -1217,7 +1336,7 @@ def _line(slide, x1, y1, x2, y2, color, width_pt) -> None:
 def _spec_text(value: float | None) -> str:
     if value is None:
         return ""
-    return format_number(value)
+    return round_half_up(value)
 
 
 def _fit_font(row_count: int, height_in: float, max_pt: float, min_pt: float = 6) -> float:
@@ -1227,14 +1346,23 @@ def _fit_font(row_count: int, height_in: float, max_pt: float, min_pt: float = 6
     return max(min_pt, min(max_pt, raw))
 
 
-def _write_lines(slide, left, top, width, height, lines: list[tuple[str, float, bool]]):
+def _write_lines(
+    slide,
+    left,
+    top,
+    width,
+    height,
+    lines: list[tuple[str, float, bool]],
+    alignment=PP_ALIGN.LEFT,
+    wrap: bool = True,
+):
     shape = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     frame = shape.text_frame
-    frame.word_wrap = True
+    frame.word_wrap = wrap
     frame.auto_size = None
     for index, (text, size, bold) in enumerate(lines):
         paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
-        paragraph.alignment = PP_ALIGN.LEFT
+        paragraph.alignment = alignment
         paragraph.space_before = Pt(0)
         paragraph.space_after = Pt(0)
         run = paragraph.add_run()
@@ -1243,7 +1371,7 @@ def _write_lines(slide, left, top, width, height, lines: list[tuple[str, float, 
     return shape
 
 
-def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=True):
+def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=True, span_top=False):
     shape = slide.shapes.add_table(
         len(rows), len(rows[0]), Inches(left), Inches(top), Inches(width), Inches(height)
     )
@@ -1261,9 +1389,11 @@ def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=Tr
                 table.cell(row_index, column_index),
                 text,
                 font_pt,
-                bold=is_header,
+                bold=is_header or (span_top and row_index == 0),
                 fill=HEADER_FILL if is_header else WHITE,
             )
+    if span_top and len(rows[0]) > 1:
+        table.cell(0, 0).merge(table.cell(0, len(rows[0]) - 1))
     return shape
 
 
