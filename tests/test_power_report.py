@@ -97,18 +97,24 @@ def _assert_shapes_inside(presentation, slide) -> None:
 
 
 def _assert_horizontal_inner_borders(table) -> None:
+    style = table._tbl.tblPr.find(qn("a:tableStyleId"))
+    if style is None or style.text != "{5940675A-B579-460E-94D1-54222C63F5DA}":
+        raise AssertionError("table style still draws a full grid")
     rows = list(table.rows)
     for index, row in enumerate(rows):
-        expect_bottom = index < len(rows) - 1
         for cell in row.cells:
             props = cell._tc.find(qn("a:tcPr"))
+            tags = [child.tag for child in props]
+            fill_at = tags.index(qn("a:solidFill"))
             for edge in ("lnL", "lnR", "lnT", "lnB"):
                 node = props.find(qn(f"a:{edge}"))
-                solid = node is not None and node.find(qn("a:solidFill")) is not None
-                if edge == "lnB" and expect_bottom:
-                    if not solid:
-                        raise AssertionError(f"missing inner horizontal border on row {index}")
-                elif solid:
+                if node is None or tags.index(node.tag) > fill_at:
+                    raise AssertionError(f"{edge} is missing or follows the fill on row {index}")
+                solid = node.find(qn("a:solidFill")) is not None
+                inner = (edge == "lnT" and index > 0) or (edge == "lnB" and index < len(rows) - 1)
+                if inner and not solid:
+                    raise AssertionError(f"missing inner horizontal border on row {index} {edge}")
+                if not inner and solid:
                     raise AssertionError(f"unexpected {edge} border on row {index}")
 
 
@@ -270,6 +276,9 @@ class DeckTests(unittest.TestCase):
             _assert_horizontal_inner_borders(shape.table)
         self.assertIn("SN-A", slide_text(lists))
         self.assertNotIn("Samples", slide_text(lists))
+        heading = next(shape for shape in lists.shapes if shape.has_text_frame and shape.text_frame.text == "Information")
+        self.assertEqual(heading.text_frame.paragraphs[0].runs[0].font.size.pt, 16)
+        self.assertLess(heading.top, list_tables[0].top)
         content_table = next(shape.table for shape in presentation.slides[2].shapes if shape.has_table)
         _assert_horizontal_inner_borders(content_table)
         self.assertNotIn('sz="800"', presentation.slides[2]._element.xml)
@@ -468,6 +477,14 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertLess(list_tables[0].height, list_tables[1].height)
         self.assertLess(list_tables[1].left + list_tables[1].width, presentation.slide_width - 400000)
         lists = slide_text(presentation.slides[1])
+        self.assertIn("Information", lists)
+        heading = next(
+            shape
+            for shape in presentation.slides[1].shapes
+            if shape.has_text_frame and shape.text_frame.text == "Information"
+        )
+        self.assertEqual(heading.text_frame.paragraphs[0].runs[0].font.size.pt, 16)
+        self.assertLess(heading.top, list_tables[0].top)
         self.assertIn("TBFHD1048401", lists)
         self.assertIn("Static Load Test", lists)
         self.assertNotIn("Samples", lists)

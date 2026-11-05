@@ -1170,7 +1170,17 @@ def _render_lists(slide, deck: Deck) -> None:
     """S/N and selected tests, sized to the text instead of the slide."""
     _white_background(slide)
     margin = 0.42
-    top = 0.32
+    heading_top = 0.26
+    heading_h = 0.32
+    _write_lines(
+        slide,
+        margin,
+        heading_top,
+        4.5,
+        heading_h,
+        [("Information", 16, True)],
+    )
+    top = heading_top + heading_h + 0.08
     bottom = 0.28
     gutter = 0.28
     serial_rows = [["S/N"], *([serial] for serial in deck.serials)]
@@ -1612,7 +1622,7 @@ def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=Tr
     shape = slide.shapes.add_table(
         len(rows), len(rows[0]), Inches(left), Inches(top), Inches(width), Inches(height)
     )
-    _remove_table_style(shape)
+    _use_borderless_table_style(shape)
     table = shape.table
     row_height = int(Inches(height) / len(rows))
     for row in table.rows:
@@ -1634,7 +1644,11 @@ def _add_table(slide, left, top, width, height, rows, font_pt, widths, header=Tr
     last = len(table.rows) - 1
     for row_index, row in enumerate(table.rows):
         for cell in row.cells:
-            _set_horizontal_border(cell, draw_bottom=row_index < last)
+            _set_horizontal_border(
+                cell,
+                draw_top=row_index > 0,
+                draw_bottom=row_index < last,
+            )
     return shape
 
 
@@ -1671,35 +1685,61 @@ def _style_run(run, size_pt: float, bold: bool, color: RGBColor = INK) -> None:
         element.set("typeface", "Calibri")
 
 
-def _set_horizontal_border(cell, draw_bottom: bool, color: str = "A6A6A6") -> None:
-    """Keep only the horizontal line between rows."""
+def _set_horizontal_border(cell, draw_top: bool, draw_bottom: bool, color: str = "A6A6A6") -> None:
+    """Keep only the horizontal line between rows.
+
+    Line elements have to precede the cell fill. PowerPoint drops borders that
+    follow the fill, then paints the default full grid.
+    """
     properties = cell._tc.get_or_add_tcPr()
     for edge in ("lnL", "lnR", "lnT", "lnB"):
         tag = qn(f"a:{edge}")
         for old in properties.findall(tag):
             properties.remove(old)
-        line = etree.SubElement(properties, tag)
-        show = edge == "lnB" and draw_bottom
-        line.set("w", "6350" if show else "0")
+    show = {"lnT": draw_top, "lnB": draw_bottom}
+    lines = []
+    for edge in ("lnL", "lnR", "lnT", "lnB"):
+        line = etree.Element(qn(f"a:{edge}"))
+        visible = show.get(edge, False)
+        line.set("w", "6350" if visible else "0")
         line.set("cap", "flat")
         line.set("cmpd", "sng")
         line.set("algn", "ctr")
-        if show:
+        if visible:
             fill = etree.SubElement(line, qn("a:solidFill"))
             color_el = etree.SubElement(fill, qn("a:srgbClr"))
             color_el.set("val", color)
             etree.SubElement(line, qn("a:prstDash")).set("val", "solid")
         else:
             etree.SubElement(line, qn("a:noFill"))
+        lines.append(line)
+    anchor = next(
+        (
+            child
+            for child in properties
+            if child.tag in {qn("a:solidFill"), qn("a:noFill"), qn("a:gradFill")}
+        ),
+        None,
+    )
+    for line in lines:
+        if anchor is not None:
+            anchor.addprevious(line)
+        else:
+            properties.append(line)
 
 
-def _remove_table_style(shape) -> None:
+# PowerPoint built-in "No Style, No Grid". Any other style redraws a full border.
+_NO_GRID_STYLE = "{5940675A-B579-460E-94D1-54222C63F5DA}"
+
+
+def _use_borderless_table_style(shape) -> None:
     table_properties = shape._element.graphic.graphicData.tbl.tblPr
-    if table_properties is None:
-        return
+    table_properties.set("firstRow", "0")
+    table_properties.set("bandRow", "0")
     style = table_properties.find(qn("a:tableStyleId"))
-    if style is not None:
-        table_properties.remove(style)
+    if style is None:
+        style = etree.SubElement(table_properties, qn("a:tableStyleId"))
+    style.text = _NO_GRID_STYLE
 
 
 def _solid_background(slide, color: RGBColor) -> None:
