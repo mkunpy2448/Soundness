@@ -350,6 +350,18 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(main(["/tmp/does-not-exist-power-report.xlsx"]), 1)
 
+    def test_no_path_uses_the_file_dialog_hook(self):
+        from power_report.cli import main
+
+        calls = []
+
+        def choose():
+            calls.append("choose")
+            return None
+
+        self.assertEqual(main([], choose_workbook=choose), 1)
+        self.assertEqual(calls, ["choose"])
+
 
 if __name__ == "__main__":
     unittest.main()
