@@ -8,13 +8,22 @@ from pathlib import Path
 from openpyxl import Workbook
 from pptx import Presentation
 
-from power_report.assemble import assemble
-from power_report.defaults import default_load, default_voltage
-from power_report.numbers import quartiles, round_half_up_2
-from power_report.parse import TemplateError, load_report
-from power_report.pptx_build import build_presentation
-from power_report.selection import choices_from_payload, page_model, save_choices, selection_path
-from power_report.server import make_server
+from run_report import (
+    TemplateError,
+    assemble,
+    build_presentation,
+    choices_from_payload,
+    default_load,
+    default_voltage,
+    load_report,
+    main,
+    make_server,
+    page_model,
+    quartiles,
+    round_half_up_2,
+    save_choices,
+    selection_path,
+)
 
 SAMPLE = Path(__file__).resolve().parents[1] / "TN-5516-8PoE-150W HV.xlsx"
 LABELS = {
@@ -346,13 +355,9 @@ class SampleWorkbookTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def test_missing_file_returns_1(self):
-        from power_report.cli import main
-
         self.assertEqual(main(["/tmp/does-not-exist-power-report.xlsx"]), 1)
 
     def test_no_path_uses_the_file_dialog_hook(self):
-        from power_report.cli import main
-
         calls = []
 
         def choose():
