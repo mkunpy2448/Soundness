@@ -4,6 +4,7 @@ This file is self-contained. Copy it together with run_report.bat; the power_rep
 """
 
 import argparse
+import ctypes
 import json
 import math
 import statistics
@@ -11,12 +12,15 @@ import subprocess
 import sys
 import traceback
 import webbrowser
+import zipfile
 from collections import Counter
 from collections.abc import Callable
+from ctypes import wintypes
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -68,7 +72,7 @@ except ImportError:
     tk = None
     filedialog = None
 
-PAGE = '''<!DOCTYPE html>
+PAGE = r'''<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
@@ -388,10 +392,92 @@ class TemplateError(Exception):
         self.missing = missing or []
 
 
+def workbook_location(path: Path) -> Path:
+    """Return the selected path without asking Windows for a final OneDrive path.
+
+    Path.resolve() opens the file to look through reparse points. On a OneDrive
+    desktop that open is rejected with Errno 13 before the workbook is read.
+    """
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return Path.cwd() / expanded
+
+
+def read_workbook_bytes(path: Path) -> bytes:
+    """Read an xlsx even when Excel still has it open."""
+    try:
+        return path.read_bytes()
+    except PermissionError:
+        if sys.platform != "win32":
+            raise
+        return _read_shared_windows(path)
+
+
+def _read_shared_windows(path: Path) -> bytes:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x80000000,
+        0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x80,
+        None,
+    )
+    invalid = wintypes.HANDLE(-1).value
+    if handle is None or handle == invalid:
+        raise PermissionError(13, "Permission denied", str(path))
+    try:
+        chunks: list[bytes] = []
+        size = 1024 * 1024
+        buffer = ctypes.create_string_buffer(size)
+        read = wintypes.DWORD(0)
+        while True:
+            ok = kernel32.ReadFile(handle, buffer, size, ctypes.byref(read), None)
+            if not ok or read.value == 0:
+                if not ok:
+                    raise PermissionError(13, "Permission denied", str(path))
+                break
+            chunks.append(buffer.raw[: read.value])
+        return b"".join(chunks)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def load_report(path: Path) -> Report:
     try:
-        workbook = load_workbook(path, data_only=False, read_only=False)
-    except InvalidFileException as exc:
+        data = read_workbook_bytes(path)
+    except PermissionError as exc:
+        raise TemplateError(
+            "無法讀取這個 Excel。請先關閉 Excel 裡已打開的同一份檔案；"
+            "若檔案在 OneDrive，請在檔案總管對它按右鍵，選「一律保留在此裝置上」，然後再執行一次。"
+        ) from exc
+    except OSError as exc:
+        raise TemplateError(f"找不到檔案：{path}") from exc
+    try:
+        workbook = load_workbook(BytesIO(data), data_only=False, read_only=False)
+    except (InvalidFileException, zipfile.BadZipFile) as exc:
         raise TemplateError(f"無法讀取 Excel：{path.name}") from exc
     try:
         sheet = _find_sheet(workbook)
@@ -1274,7 +1360,7 @@ def serve(report: Report, workbook: Path, open_browser: bool = True) -> int:
 
 
 def make_server(report: Report, workbook: Path) -> ThreadingHTTPServer:
-    handler = _handler_class(report, workbook.resolve())
+    handler = _handler_class(report, workbook_location(workbook))
     return ThreadingHTTPServer(("127.0.0.1", 0), handler)
 
 
@@ -1348,12 +1434,9 @@ def main(argv: list[str] | None = None, choose_workbook: Callable[[], Path | Non
         if picked is None:
             print("未選擇檔案。", file=sys.stderr)
             return 1
-        workbook = picked.expanduser().resolve()
+        workbook = workbook_location(picked)
     else:
-        workbook = args.workbook.expanduser().resolve()
-    if not workbook.is_file():
-        print(f"找不到檔案：{workbook}", file=sys.stderr)
-        return 1
+        workbook = workbook_location(args.workbook)
     try:
         report = load_report(workbook)
     except TemplateError as exc:

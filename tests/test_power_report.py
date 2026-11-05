@@ -5,6 +5,8 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+import run_report
+
 from openpyxl import Workbook
 from pptx import Presentation
 
@@ -144,6 +146,19 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(thd.upper)
         self.assertIsNone(thd.lower)
 
+    def test_permission_denied_explains_the_next_step(self):
+        def deny(path: Path) -> bytes:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        original = run_report.read_workbook_bytes
+        run_report.read_workbook_bytes = deny
+        try:
+            with self.assertRaises(TemplateError) as caught:
+                load_report(Path("locked.xlsx"))
+        finally:
+            run_report.read_workbook_bytes = original
+        self.assertIn("一律保留在此裝置上", str(caught.exception))
+
     def test_missing_label_names_the_label(self):
         write_fixture(self.path, [{"seq": 1, "ti": "T", "ext": "1VAC", "var": "Vout_1", "values": [1, 2]}], ["SN-A", "SN-B"], omit="Cp")
         with self.assertRaises(TemplateError) as caught:
@@ -260,6 +275,9 @@ class ServerTests(unittest.TestCase):
         page = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode("utf-8")
         self.assertIn("產生 PPT", page)
         self.assertIn("Vout_1", page)
+        self.assertIn('payload.path + "\\n已儲存勾選："', page)
+        script = page.split("<script>\n", 1)[1].split("</script>", 1)[0]
+        self.assertNotIn("\n已儲存勾選", script)
         payload = json.dumps(
             {
                 "groups": [
