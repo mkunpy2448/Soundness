@@ -11,6 +11,10 @@ from openpyxl import Workbook
 from pptx import Presentation
 
 from run_report import (
+    ContentSlide,
+    Deck,
+    SlideVariable,
+    SummaryRow,
     TemplateError,
     assemble,
     build_presentation,
@@ -230,9 +234,27 @@ class DeckTests(unittest.TestCase):
         self.assertIn("2026/1/1~2026/1/2", summary)
         meta = next(shape.table for shape in summary_slide.shapes if shape.has_table)
         self.assertEqual(meta.rows[0].cells[0].text, "deck")
-        self.assertEqual([cell.text for cell in meta.rows[2].cells], ["N", "2"])
+        self.assertEqual([cell.text for cell in meta.rows[1].cells], ["Input voltage range", "Not provided"])
+        self.assertEqual([cell.text for cell in meta.rows[2].cells], ["Full load current", "Not provided"])
+        self.assertEqual([cell.text for cell in meta.rows[4].cells], ["N", "2"])
         self.assertIn("SN-A", summary)
         self.assertNotIn("Samples", summary)
+
+    def test_one_chart_uses_the_same_cell_as_six(self):
+        def presentation(count: int):
+            variables = [
+                SlideVariable(f"V{index}", 4, 0, "1", "1", "1", "1", [1, 2, 3])
+                for index in range(count)
+            ]
+            content = ContentSlide("1", "Static Load Test", "90VAC", "1 A", variables)
+            deck = Deck("sample.xlsx", [], 1, ["SN"], [SummaryRow("1", "Static Load Test", "90VAC")], [content])
+            return build_presentation(deck)
+
+        def axis_height(slide) -> int:
+            heights = [shape.height for shape in slide.shapes if shape.width < 30000 and shape.height > 200000]
+            return max(heights)
+
+        self.assertEqual(axis_height(presentation(1).slides[1]), axis_height(presentation(6).slides[1]))
 
 
 class SelectionTests(unittest.TestCase):
@@ -286,11 +308,15 @@ class ServerTests(unittest.TestCase):
         page = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode("utf-8")
         self.assertIn("產生 PPT", page)
         self.assertIn("Vout_1", page)
+        self.assertIn("輸入電壓範圍", page)
+        self.assertIn("滿載電流", page)
         self.assertIn('payload.path + "\\n已儲存勾選："', page)
         script = page.split("<script>\n", 1)[1].split("</script>", 1)[0]
         self.assertNotIn("\n已儲存勾選", script)
         payload = json.dumps(
             {
+                "voltage_range": "90-264VAC",
+                "full_load_current": "8.5A",
                 "groups": [
                     {
                         "key": report.groups[0].key,
@@ -313,6 +339,13 @@ class ServerTests(unittest.TestCase):
         content = slide_text(presentation.slides[1])
         self.assertIn("100VAC", content)
         self.assertIn("1.50", content)
+        self.assertIn("U: 5.08", content)
+        self.assertIn("L: 5.02", content)
+        summary = slide_text(presentation.slides[0])
+        self.assertIn("Input voltage range", summary)
+        self.assertIn("90-264VAC", summary)
+        self.assertIn("Full load current", summary)
+        self.assertIn("8.5A", summary)
         self.assertIn("Calibri", presentation.slides[1]._element.xml)
         self.assertIn("FF0000", presentation.slides[1]._element.xml)
         saved = json.loads(Path(body["selectionPath"]).read_text(encoding="utf-8"))
@@ -369,7 +402,9 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertEqual(deck.unit_count, 10)
         self.assertEqual(deck.dates, ["2026/7/27~2026/9/30"])
         presentation = build_presentation(deck)
-        self.assertEqual(len(presentation.slides), 26)
+        expected_slides = 1 + sum((len(slide.variables) + 5) // 6 for slide in deck.slides)
+        self.assertEqual(len(presentation.slides), expected_slides)
+        self.assertGreater(expected_slides, 26)
         _assert_shapes_inside(presentation, presentation.slides[0])
         summary_tables = [shape for shape in presentation.slides[0].shapes if shape.has_table]
         self.assertLess(summary_tables[1].height, summary_tables[2].height)
@@ -396,6 +431,12 @@ class SampleWorkbookTests(unittest.TestCase):
         self.assertNotIn("4.637153", text)
         self.assertIn("50.4", text)
         self.assertNotIn("50.400002", text)
+        self.assertIn("U: 5.25", text)
+        self.assertIn("L: 4.75", text)
+        table_shape = next(shape for shape in first.shapes if shape.has_table)
+        for shape in first.shapes:
+            if shape.has_text_frame and shape.text_frame.text in {"Vout_1", "Vout_2", "Vnpp_1", "Vnpp_2"}:
+                self.assertGreaterEqual(shape.top + 20000, table_shape.top + table_shape.height)
         self.assertNotIn("2026/7/27~2026/9/30", text)
         self.assertNotIn("TBFED1022848", text)
         self.assertIn("1F4E79", first._element.xml)

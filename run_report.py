@@ -89,6 +89,7 @@ PAGE = r'''<!DOCTYPE html>
     button.primary:disabled { opacity: 0.6; cursor: default; }
     button.ghost { background: #fff; border: 1px solid #bbb; padding: 4px 8px; }
     .hint { margin: 0; padding: 10px 20px 0; color: #333; font-size: 14px; }
+    .report-fields { display: flex; flex-wrap: wrap; gap: 24px; padding: 12px 20px 0; background: #fff; }
     main { padding: 12px 20px 48px; }
     section { background: #fff; border: 1px solid #ddd; margin-bottom: 12px; padding: 12px 14px; }
     section h2 { margin: 0 0 8px; font-size: 16px; }
@@ -111,12 +112,22 @@ PAGE = r'''<!DOCTYPE html>
     <input id="filter" type="search" placeholder="篩選變數名稱">
     <button class="primary" id="generate" type="button">產生 PPT</button>
   </header>
+  <div class="report-fields">
+    <label class="field">輸入電壓範圍
+      <input id="voltage-range" type="text">
+    </label>
+    <label class="field">滿載電流
+      <input id="full-load" type="text">
+    </label>
+  </div>
   <p class="hint">勾選要出現在 PPT 的變數。輸入電壓與負載電流可以修改，產生時以格子裡的文字為準。</p>
   <main id="groups"></main>
   <script id="report-data" type="application/json">__REPORT_JSON__</script>
   <script>
     const report = JSON.parse(document.getElementById("report-data").textContent);
     document.getElementById("file-name").textContent = report.fileName;
+    document.getElementById("voltage-range").value = report.voltageRange || "";
+    document.getElementById("full-load").value = report.fullLoadCurrent || "";
 
     const root = document.getElementById("groups");
     for (const group of report.groups) {
@@ -181,7 +192,11 @@ PAGE = r'''<!DOCTYPE html>
         const response = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ groups: collect() }),
+          body: JSON.stringify({
+            groups: collect(),
+            voltage_range: document.getElementById("voltage-range").value,
+            full_load_current: document.getElementById("full-load").value,
+          }),
         });
         const payload = await response.json();
         if (!response.ok || !payload.ok) {
@@ -744,6 +759,8 @@ class Deck:
     serials: list[str]
     rows: list[SummaryRow]
     slides: list[ContentSlide]
+    voltage_range: str = NOT_PROVIDED
+    full_load_current: str = NOT_PROVIDED
 
 
 @dataclass
@@ -754,7 +771,12 @@ class GroupChoice:
     checked_uids: set[str]
 
 
-def assemble(report: Report, choices: list[GroupChoice]) -> Deck:
+def assemble(
+    report: Report,
+    choices: list[GroupChoice],
+    voltage_range: str = "",
+    full_load_current: str = "",
+) -> Deck:
     by_key = {choice.key: choice for choice in choices}
     slides: list[ContentSlide] = []
     dates: list[str] = []
@@ -795,7 +817,14 @@ def assemble(report: Report, choices: list[GroupChoice]) -> Deck:
         serials=list(report.serials),
         rows=rows,
         slides=slides,
+        voltage_range=_cover_text(voltage_range),
+        full_load_current=_cover_text(full_load_current),
     )
+
+
+def _cover_text(value: str) -> str:
+    text = value.strip()
+    return text if text else NOT_PROVIDED
 
 
 def _slide_variable(variable) -> SlideVariable:
@@ -846,7 +875,30 @@ def load_saved_groups(path: Path) -> dict:
     return groups
 
 
-def page_model(report: Report, saved_groups: dict) -> dict:
+def load_saved_cover(path: Path) -> tuple[str, str]:
+    if not path.is_file():
+        return "", ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        return "", ""
+    return _optional_text(payload.get("voltage_range")), _optional_text(payload.get("full_load_current"))
+
+
+def _optional_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def page_model(
+    report: Report,
+    saved_groups: dict,
+    voltage_range: str = "",
+    full_load_current: str = "",
+) -> dict:
     groups = []
     for group in report.picker_groups():
         saved = saved_groups.get(group.key)
@@ -883,7 +935,12 @@ def page_model(report: Report, saved_groups: dict) -> dict:
                 "variables": variables,
             }
         )
-    return {"fileName": report.source_name, "groups": groups}
+    return {
+        "fileName": report.source_name,
+        "voltageRange": voltage_range,
+        "fullLoadCurrent": full_load_current,
+        "groups": groups,
+    }
 
 
 def choices_from_payload(report: Report, payload: object) -> list[GroupChoice]:
@@ -917,7 +974,13 @@ def choices_from_payload(report: Report, payload: object) -> list[GroupChoice]:
     return choices
 
 
-def save_choices(path: Path, report: Report, choices: list[GroupChoice]) -> None:
+def save_choices(
+    path: Path,
+    report: Report,
+    choices: list[GroupChoice],
+    voltage_range: str = "",
+    full_load_current: str = "",
+) -> None:
     by_key = {choice.key: choice for choice in choices}
     groups = {}
     for group in report.picker_groups():
@@ -932,7 +995,15 @@ def save_choices(path: Path, report: Report, choices: list[GroupChoice]) -> None
                 for variable in group.plottable_variables
             },
         }
-    _write_json(path, {"version": 2, "groups": groups})
+    _write_json(
+        path,
+        {
+            "version": 2,
+            "voltage_range": voltage_range,
+            "full_load_current": full_load_current,
+            "groups": groups,
+        },
+    )
 
 
 def _stored_text(value: object, default: str) -> str:
@@ -1019,7 +1090,7 @@ def build_presentation(deck: Deck) -> Presentation:
     blank = presentation.slide_layouts[6]
     _render_summary(presentation.slides.add_slide(blank), deck)
     for content in deck.slides:
-        _render_content(presentation.slides.add_slide(blank), deck, content)
+        _render_content(presentation, blank, content)
     return presentation
 
 
@@ -1029,7 +1100,8 @@ def _render_summary(slide, deck: Deck) -> None:
     top = 0.3
     width = SLIDE_W - 2 * margin
     date_text = ", ".join(deck.dates)
-    meta_height = 1.14
+    meta_height = 1.72
+    label_width = 2.45
     _add_table(
         slide,
         margin,
@@ -1038,11 +1110,13 @@ def _render_summary(slide, deck: Deck) -> None:
         meta_height,
         [
             [Path(deck.source_name).stem, ""],
+            ["Input voltage range", deck.voltage_range],
+            ["Full load current", deck.full_load_current],
             ["Date", date_text],
             ["N", str(deck.unit_count)],
         ],
-        font_pt=14,
-        widths=[1.5, width - 1.5],
+        font_pt=13,
+        widths=[label_width, width - label_width],
         header=False,
         span_top=True,
     )
@@ -1078,70 +1152,100 @@ def _render_summary(slide, deck: Deck) -> None:
     )
 
 
-def _render_content(slide, deck: Deck, content: ContentSlide) -> None:
-    _white_background(slide)
-    margin_x = 0.4
-    margin_y = 0.26
+CHART_COLUMNS = 3
+CHART_ROWS = 2
+CHARTS_PER_SLIDE = CHART_COLUMNS * CHART_ROWS
+
+
+def _content_frame() -> dict[str, float]:
+    """Header, table, and a fixed 2-by-3 chart band. Chart cells never change size."""
+    margin_x = 0.32
+    margin_y = 0.18
     width = SLIDE_W - 2 * margin_x
-    header_h = 0.92
+    header_h = 0.70
+    table_top = margin_y + header_h + 0.04
+    chart_h = 4.36
+    chart_top = SLIDE_H - margin_y - chart_h
+    table_h = chart_top - 0.08 - table_top
+    return {
+        "margin_x": margin_x,
+        "margin_y": margin_y,
+        "width": width,
+        "header_h": header_h,
+        "table_top": table_top,
+        "table_h": table_h,
+        "chart_top": chart_top,
+        "chart_h": chart_h,
+    }
+
+
+def _render_content(presentation: Presentation, blank, content: ContentSlide) -> None:
+    variables = content.variables
+    pages = [variables[start : start + CHARTS_PER_SLIDE] for start in range(0, len(variables), CHARTS_PER_SLIDE)]
+    if not pages:
+        pages = [[]]
+    for page, chunk in enumerate(pages):
+        slide = presentation.slides.add_slide(blank)
+        _render_content_slide(slide, content, chunk, include_table=(page == 0))
+
+
+def _render_content_slide(slide, content: ContentSlide, variables: list[SlideVariable], include_table: bool) -> None:
+    _white_background(slide)
+    frame = _content_frame()
     _write_lines(
         slide,
-        margin_x,
-        margin_y,
-        width,
-        header_h,
+        frame["margin_x"],
+        frame["margin_y"],
+        frame["width"],
+        frame["header_h"],
         [
             (content.title, 16, True),
             (f"Input voltage: {content.input_voltage}", 12, False),
             (f"Load current: {content.load_current}", 12, False),
         ],
     )
-    count = len(content.variables)
-    content_top = margin_y + header_h + 0.06
-    content_bottom = SLIDE_H - margin_y
-    available = content_bottom - content_top
-    table_h = min(available * 0.55, 0.28 + count * 0.20)
-    table_h = max(table_h, 0.7)
-    if available - table_h < 1.6:
-        table_h = max(0.6, available - 1.6)
-    rows = [list(STAT_HEADERS)]
-    for variable in content.variables:
-        rows.append(
-            [
-                variable.name,
-                _spec_text(variable.upper),
-                _spec_text(variable.lower),
-                variable.mean,
-                variable.ca,
-                variable.cpk,
-                variable.cp,
-            ]
+    if include_table:
+        rows = [list(STAT_HEADERS)]
+        for variable in content.variables:
+            rows.append(
+                [
+                    variable.name,
+                    _spec_text(variable.upper),
+                    _spec_text(variable.lower),
+                    variable.mean,
+                    variable.ca,
+                    variable.cpk,
+                    variable.cp,
+                ]
+            )
+        _add_table(
+            slide,
+            frame["margin_x"],
+            frame["table_top"],
+            frame["width"],
+            frame["table_h"],
+            rows,
+            font_pt=_fit_font(len(rows), frame["table_h"], 11, 6),
+            widths=[frame["width"] * part for part in (0.20, 0.14, 0.14, 0.13, 0.13, 0.13, 0.13)],
         )
-    _add_table(
+    _draw_chart_grid(
         slide,
-        margin_x,
-        content_top,
-        width,
-        table_h,
-        rows,
-        font_pt=_fit_font(len(rows), table_h, 11, 6),
-        widths=[width * part for part in (0.20, 0.14, 0.14, 0.13, 0.13, 0.13, 0.13)],
+        frame["margin_x"],
+        frame["chart_top"],
+        frame["width"],
+        frame["chart_h"],
+        variables,
     )
-    chart_top = content_top + table_h + 0.08
-    chart_h = content_bottom - chart_top
-    _draw_chart_grid(slide, margin_x, chart_top, width, chart_h, content)
 
 
-def _draw_chart_grid(slide, left, top, width, height, content: ContentSlide) -> None:
-    count = len(content.variables)
-    if count == 0 or height <= 0:
+def _draw_chart_grid(slide, left, top, width, height, variables: list[SlideVariable]) -> None:
+    if height <= 0:
         return
-    columns, rows = _grid_shape(count)
-    cell_w = width / columns
-    cell_h = height / rows
-    for index, variable in enumerate(content.variables):
-        column = index % columns
-        row = index // columns
+    cell_w = width / CHART_COLUMNS
+    cell_h = height / CHART_ROWS
+    for index, variable in enumerate(variables[:CHARTS_PER_SLIDE]):
+        column = index % CHART_COLUMNS
+        row = index // CHART_COLUMNS
         _draw_boxplot(
             slide,
             left + column * cell_w,
@@ -1153,24 +1257,6 @@ def _draw_chart_grid(slide, left, top, width, height, content: ContentSlide) -> 
             variable.lower,
             variable.upper,
         )
-
-
-def _grid_shape(count: int) -> tuple[int, int]:
-    if count <= 1:
-        return 1, 1
-    if count <= 2:
-        return 2, 1
-    if count <= 4:
-        return 2, 2
-    if count <= 6:
-        return 3, 2
-    if count <= 8:
-        return 4, 2
-    if count <= 12:
-        return 4, 3
-    if count <= 15:
-        return 5, 3
-    return 6, math.ceil(count / 6)
 
 
 def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) -> None:
@@ -1239,10 +1325,38 @@ def _draw_boxplot(slide, left, top, width, height, title, values, lower, upper) 
         dot.fill.fore_color.rgb = POINT
         dot.line.fill.background()
         dot.shadow.inherit = False
-    for limit in (lower, upper):
-        if limit is None or limit < lo or limit > hi:
-            continue
-        _hline(slide, plot_left, y_of(limit), plot_left + plot_w, SPEC, 1.25)
+    _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, upper, "U", above=True)
+    _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, lower, "L", above=False)
+
+
+def _mark_limit(slide, plot_left, plot_top, plot_w, plot_h, y_of, lo, hi, limit, tag: str, above: bool) -> None:
+    if limit is None:
+        return
+    label = f"{tag}: {round_half_up(limit)}"
+    label_h = 0.16
+    label_w = min(1.2, plot_w * 0.46)
+    if lo <= limit <= hi:
+        y_pos = y_of(limit)
+        _hline(slide, plot_left, y_pos, plot_left + plot_w, SPEC, 1.5)
+        raw_top = y_pos - label_h - 0.01 if above else y_pos + 0.02
+    elif limit > hi:
+        raw_top = plot_top
+        _hline(slide, plot_left, plot_top + 0.02, plot_left + min(0.7, plot_w), SPEC, 1.5)
+    else:
+        raw_top = plot_top + plot_h - label_h
+        edge = plot_top + plot_h - 0.02
+        _hline(slide, plot_left, edge, plot_left + min(0.7, plot_w), SPEC, 1.5)
+    top = min(max(raw_top, plot_top), plot_top + plot_h - label_h)
+    _write_lines(
+        slide,
+        plot_left + 0.05,
+        top,
+        label_w,
+        label_h,
+        [(label, 8, True)],
+        color=SPEC,
+        wrap=False,
+    )
 
 
 def _axis_limits(values: list[float]) -> tuple[float, float]:
@@ -1355,6 +1469,7 @@ def _write_lines(
     lines: list[tuple[str, float, bool]],
     alignment=PP_ALIGN.LEFT,
     wrap: bool = True,
+    color: RGBColor = INK,
 ):
     shape = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     frame = shape.text_frame
@@ -1367,7 +1482,7 @@ def _write_lines(
         paragraph.space_after = Pt(0)
         run = paragraph.add_run()
         run.text = text
-        _style_run(run, size, bold)
+        _style_run(run, size, bold, color)
     return shape
 
 
@@ -1417,12 +1532,12 @@ def _fill_cell(cell, text: str, font_pt: float, bold: bool, fill: RGBColor) -> N
     _set_cell_border(cell)
 
 
-def _style_run(run, size_pt: float, bold: bool) -> None:
+def _style_run(run, size_pt: float, bold: bool, color: RGBColor = INK) -> None:
     run.font.name = "Calibri"
     run.font.size = Pt(size_pt)
     run.font.bold = bold
     run.font.italic = False
-    run.font.color.rgb = INK
+    run.font.color.rgb = color
     properties = run._r.get_or_add_rPr()
     for tag in ("a:latin", "a:ea", "a:cs"):
         element = properties.find(qn(tag))
@@ -1500,7 +1615,9 @@ def _handler_class(report: Report, workbook: Path):
             if self.path.split("?", 1)[0] not in {"/", "/index.html"}:
                 self.send_error(404)
                 return
-            model = page_model(report, load_saved_groups(selection_path(workbook)))
+            selection = selection_path(workbook)
+            voltage_range, full_load = load_saved_cover(selection)
+            model = page_model(report, load_saved_groups(selection), voltage_range, full_load)
             body = PAGE.replace("__REPORT_JSON__", _json_for_html(model)).encode("utf-8")
             self._send(200, "text/html; charset=utf-8", body)
 
@@ -1516,11 +1633,13 @@ def _handler_class(report: Report, workbook: Path):
             try:
                 payload = json.loads(raw.decode("utf-8"))
                 choices = choices_from_payload(report, payload)
-                deck = assemble(report, choices)
+                voltage_range = _optional_text(payload.get("voltage_range")) if isinstance(payload, dict) else ""
+                full_load = _optional_text(payload.get("full_load_current")) if isinstance(payload, dict) else ""
+                deck = assemble(report, choices, voltage_range, full_load)
                 pptx_path = workbook.with_suffix(".pptx")
                 saved_path = selection_path(workbook)
                 write_pptx(deck, pptx_path)
-                save_choices(saved_path, report, choices)
+                save_choices(saved_path, report, choices, voltage_range, full_load)
             except Exception as exc:
                 traceback.print_exc()
                 self._send_json(500, {"ok": False, "error": str(exc)})
